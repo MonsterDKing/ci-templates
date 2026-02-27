@@ -1,0 +1,236 @@
+# Reusable workflow: NestJS CI/CD with AWS Elastic Beanstalk
+# Usage in your project:
+#   jobs:
+#     deploy:
+#       uses: MonsterDKing/ci-templates/.github/workflows/nestjs-aws-eb.yml@main
+#       secrets: inherit
+
+name: NestJS + AWS EB CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        required: false
+        default: "20.x"
+        type: string
+      run-e2e:
+        description: "Run E2E tests"
+        required: false
+        default: true
+        type: boolean
+      deploy-staging:
+        description: "Deploy to staging"
+        required: false
+        default: false
+        type: boolean
+      deploy-production:
+        description: "Deploy to production"
+        required: false
+        default: false
+        type: boolean
+      runner-label:
+        description: "Runner label for deploy jobs"
+        required: false
+        default: "self-hosted"
+        type: string
+      aws-region:
+        description: "AWS region"
+        required: false
+        default: "us-east-2"
+        type: string
+    secrets:
+      DATABASE_URL:
+        required: false
+      JWT_SECRET:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      EB_APPLICATION_NAME:
+        required: false
+      EB_STAGING_ENV_NAME:
+        required: false
+      EB_PRODUCTION_ENV_NAME:
+        required: false
+      S3_DEPLOY_BUCKET:
+        required: false
+      STAGING_DATABASE_URL:
+        required: false
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format -- --check
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:cov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  test-e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    if: inputs.run-e2e
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+      JWT_SECRET: test-secret-key-for-ci
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm run test:e2e
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test, test-e2e]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/
+            package.json
+            package-lock.json
+            prisma/
+            Procfile
+            .platform/
+          retention-days: 7
+
+  deploy-staging:
+    name: Deploy Staging
+    runs-on: ${{ inputs.runner-label }}
+    needs: build
+    if: inputs.deploy-staging
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - run: npm ci --production
+      - run: npx prisma generate
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: Deploy to EB
+        run: |
+          DEPLOY_ZIP="staging-$(date +%Y%m%d-%H%M%S).zip"
+          zip -r "${DEPLOY_ZIP}" dist/ node_modules/ prisma/ package.json Procfile .platform/ -x "node_modules/.cache/*"
+          aws s3 cp "${DEPLOY_ZIP}" "s3://${{ secrets.S3_DEPLOY_BUCKET }}/${DEPLOY_ZIP}"
+          VERSION="staging-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA::8}"
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --version-label "${VERSION}" \
+            --source-bundle S3Bucket="${{ secrets.S3_DEPLOY_BUCKET }}",S3Key="${DEPLOY_ZIP}"
+          aws elasticbeanstalk update-environment \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --environment-name "${{ secrets.EB_STAGING_ENV_NAME }}" \
+            --version-label "${VERSION}"
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: npx prisma migrate deploy
+
+  deploy-production:
+    name: Deploy Production
+    runs-on: ${{ inputs.runner-label }}
+    needs: build
+    if: inputs.deploy-production
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - run: npm ci --production
+      - run: npx prisma generate
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: Deploy to EB
+        run: |
+          DEPLOY_ZIP="prod-$(date +%Y%m%d-%H%M%S).zip"
+          zip -r "${DEPLOY_ZIP}" dist/ node_modules/ prisma/ package.json Procfile .platform/ -x "node_modules/.cache/*"
+          aws s3 cp "${DEPLOY_ZIP}" "s3://${{ secrets.S3_DEPLOY_BUCKET }}/${DEPLOY_ZIP}"
+          VERSION="prod-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA::8}"
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --version-label "${VERSION}" \
+            --source-bundle S3Bucket="${{ secrets.S3_DEPLOY_BUCKET }}",S3Key="${DEPLOY_ZIP}"
+          aws elasticbeanstalk update-environment \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --environment-name "${{ secrets.EB_PRODUCTION_ENV_NAME }}" \
+            --version-label "${VERSION}"
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx prisma migrate deploy

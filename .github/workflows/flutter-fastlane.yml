@@ -1,0 +1,201 @@
+# Reusable workflow: Flutter + Fastlane CI/CD (Self-Hosted Runner)
+# Usage in your project:
+#   jobs:
+#     deploy:
+#       uses: MonsterDKing/ci-templates/.github/workflows/flutter-fastlane.yml@main
+#       secrets: inherit
+
+name: Flutter + Fastlane CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: "Platform to build (all, ios, android)"
+        required: false
+        default: "all"
+        type: string
+      flavor:
+        description: "Flavor to build (all, dev, prod)"
+        required: false
+        default: "all"
+        type: string
+      runner-label:
+        description: "Self-hosted runner label"
+        required: false
+        default: "self-hosted"
+        type: string
+      flutter-version:
+        description: "Flutter version (empty = use system)"
+        required: false
+        default: ""
+        type: string
+      ios-dev-bundle-id:
+        description: "iOS dev bundle identifier"
+        required: false
+        default: ""
+        type: string
+      ios-prod-bundle-id:
+        description: "iOS prod bundle identifier"
+        required: false
+        default: ""
+        type: string
+      android-dev-package:
+        description: "Android dev package name"
+        required: false
+        default: ""
+        type: string
+      android-prod-package:
+        description: "Android prod package name"
+        required: false
+        default: ""
+        type: string
+    secrets:
+      APP_STORE_CONNECT_API_KEY_P8:
+        required: false
+      ASC_KEY_ID:
+        required: false
+      ASC_ISSUER_ID:
+        required: false
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEY_PROPERTIES:
+        required: false
+      GOOGLE_PLAY_JSON_KEY:
+        required: false
+
+jobs:
+  ios:
+    if: inputs.platform == 'all' || inputs.platform == 'ios'
+    name: iOS
+    runs-on: ${{ inputs.runner-label }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bundle install (iOS)
+        working-directory: ios
+        run: |
+          bundle config set --local path 'vendor/bundle'
+          bundle install
+
+      - name: Prepare App Store Connect key
+        env:
+          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+        run: |
+          if [ -z "${APP_STORE_CONNECT_API_KEY_P8}" ]; then
+            echo "::error::Missing secret APP_STORE_CONNECT_API_KEY_P8"
+            exit 1
+          fi
+          KEY_PATH="${RUNNER_TEMP}/appstore_connect_api_key.p8"
+          printf '%s' "${APP_STORE_CONNECT_API_KEY_P8}" > "${KEY_PATH}"
+          chmod 600 "${KEY_PATH}"
+          echo "ASC_KEY_FILEPATH=${KEY_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Build & Deploy iOS (dev)
+        if: inputs.flavor != 'prod'
+        working-directory: ios
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: bundle exec fastlane deploy_dev_testflight
+
+      - name: Upload iOS dev artifact
+        if: inputs.flavor != 'prod'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-dev-ipa
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build & Deploy iOS (prod)
+        if: inputs.flavor != 'dev'
+        working-directory: ios
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: bundle exec fastlane deploy_prod_testflight
+
+      - name: Upload iOS prod artifact
+        if: inputs.flavor != 'dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-prod-ipa
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/appstore_connect_api_key.p8"
+
+  android:
+    if: inputs.platform == 'all' || inputs.platform == 'android'
+    name: Android
+    runs-on: ${{ inputs.runner-label }}
+    needs: ios
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore Android signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_PROPERTIES: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+        run: |
+          echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > android/key.jks
+          echo "${ANDROID_KEY_PROPERTIES}" > android/key.properties
+
+      - name: Bundle install (Android)
+        working-directory: android
+        run: |
+          bundle config set --local path 'vendor/bundle'
+          bundle install
+
+      - name: Prepare Google Play credentials
+        env:
+          GOOGLE_PLAY_JSON_KEY: ${{ secrets.GOOGLE_PLAY_JSON_KEY }}
+        run: |
+          if [ -n "${GOOGLE_PLAY_JSON_KEY}" ]; then
+            KEY_PATH="${RUNNER_TEMP}/google_play_key.json"
+            printf '%s' "${GOOGLE_PLAY_JSON_KEY}" > "${KEY_PATH}"
+            chmod 600 "${KEY_PATH}"
+            echo "SUPPLY_JSON_KEY=${KEY_PATH}" >> "${GITHUB_ENV}"
+          else
+            echo "::warning::GOOGLE_PLAY_JSON_KEY not set - deploy disabled"
+          fi
+
+      - name: Build & Deploy Android (dev)
+        if: inputs.flavor != 'prod'
+        working-directory: android
+        run: bundle exec fastlane ci_cd_dev
+
+      - name: Upload Android dev artifact
+        if: inputs.flavor != 'prod'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-dev-aab
+          path: build/app/outputs/bundle/devRelease/app-dev-release.aab
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build & Deploy Android (prod)
+        if: inputs.flavor != 'dev'
+        working-directory: android
+        run: bundle exec fastlane ci_cd_prod
+
+      - name: Upload Android prod artifact
+        if: inputs.flavor != 'dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-prod-aab
+          path: build/app/outputs/bundle/prodRelease/app-prod-release.aab
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f android/key.jks android/key.properties
+          rm -f "${RUNNER_TEMP}/google_play_key.json"
