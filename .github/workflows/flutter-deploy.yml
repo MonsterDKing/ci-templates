@@ -1,0 +1,440 @@
+name: Flutter Deploy (Self-Hosted)
+
+# =============================================================================
+# Reusable workflow for Flutter iOS + Android deployment
+# - Zero dependency on host machine state (keychain, profiles, Xcode login)
+# - Creates temporary keychain per build
+# - Installs certificates and profiles from secrets
+# - Uses flutter build ipa/appbundle directly
+# - Uploads via API keys (no interactive login)
+# =============================================================================
+
+on:
+  workflow_call:
+    inputs:
+      flutter_version:
+        description: 'Flutter version or channel (e.g., "stable", "3.41.4")'
+        type: string
+        default: 'stable'
+      ios_bundle_id:
+        description: 'iOS bundle identifier (e.g., com.example.app)'
+        required: true
+        type: string
+      android_package_name:
+        description: 'Android package name (e.g., com.example.app)'
+        required: true
+        type: string
+      flavor:
+        description: 'App flavor (leave empty for no flavor)'
+        type: string
+        default: ''
+      entry_point:
+        description: 'Dart entry point (leave empty for default lib/main.dart)'
+        type: string
+        default: ''
+      deploy_ios:
+        description: 'Deploy to TestFlight'
+        type: boolean
+        default: true
+      deploy_android:
+        description: 'Deploy to Google Play'
+        type: boolean
+        default: true
+      android_track:
+        description: 'Google Play track (internal, alpha, beta, production)'
+        type: string
+        default: 'internal'
+      timeout_minutes:
+        description: 'Job timeout in minutes'
+        type: number
+        default: 90
+      build_number_floor:
+        description: 'Minimum build number (safety floor)'
+        type: number
+        default: 1
+    secrets:
+      # iOS Signing
+      APPLE_CERTIFICATE_P12:
+        description: 'Distribution certificate (.p12) base64 encoded'
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        description: 'Password for the .p12 certificate'
+        required: false
+      PROVISIONING_PROFILE:
+        description: 'Provisioning profile (.mobileprovision) base64 encoded'
+        required: false
+      # App Store Connect
+      ASC_KEY_P8:
+        description: 'App Store Connect API key (.p8) content'
+        required: false
+      ASC_KEY_ID:
+        description: 'App Store Connect Key ID'
+        required: false
+      ASC_ISSUER_ID:
+        description: 'App Store Connect Issuer ID'
+        required: false
+      # Android Signing
+      ANDROID_KEYSTORE_BASE64:
+        description: 'Android keystore base64 encoded'
+        required: false
+      ANDROID_KEY_PROPERTIES:
+        description: 'Android key.properties content'
+        required: false
+      # Google Play
+      GOOGLE_PLAY_JSON_KEY:
+        description: 'Google Play service account JSON key content'
+        required: false
+      # App env
+      FLUTTER_ENV:
+        description: 'Content for .env file (optional)'
+        required: false
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: self-hosted
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+
+    env:
+      TEMP_KEYCHAIN_NAME: build_temp_${{ github.run_id }}
+      TEMP_KEYCHAIN_PASSWORD: ${{ github.run_id }}_${{ github.run_attempt }}_temp
+
+    steps:
+      # ========== SETUP ==========
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PATH for self-hosted runner
+        run: |
+          echo "/Volumes/NVME_FAST/dev/sdk/fvm/versions/${{ inputs.flutter_version }}/bin" >> $GITHUB_PATH
+          echo "/Volumes/NVME_FAST/dev/sdk/fvm/versions/${{ inputs.flutter_version }}/bin/cache/dart-sdk/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/openjdk@17/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/ruby/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/lib/ruby/gems/4.0.0/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/sbin" >> $GITHUB_PATH
+          echo "JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" >> $GITHUB_ENV
+          echo "ANDROID_HOME=/Volumes/NVME_FAST/dev/sdk/android" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/Volumes/NVME_FAST/dev/sdk/android" >> $GITHUB_ENV
+          echo "GRADLE_USER_HOME=/Volumes/NVME_FAST/dev/cache/gradle" >> $GITHUB_ENV
+          echo "PUB_CACHE=/Volumes/NVME_FAST/dev/cache/pub" >> $GITHUB_ENV
+          echo "CP_HOME_DIR=/Volumes/NVME_FAST/dev/cache/cocoapods" >> $GITHUB_ENV
+
+      - name: Verify Flutter
+        run: |
+          which flutter
+          flutter --version
+          flutter config --no-analytics --no-cli-animations
+
+      - name: Extract version from pubspec
+        id: version
+        run: |
+          FULL_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //')
+          VERSION=$(echo "$FULL_VERSION" | cut -d'+' -f1)
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      # ========== iOS SIGNING SETUP (Temporary Keychain) ==========
+
+      - name: Setup iOS signing
+        if: inputs.deploy_ios
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE: ${{ secrets.PROVISIONING_PROFILE }}
+        run: |
+          # Validate secrets
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$PROVISIONING_PROFILE" ]; then
+            echo "::error::Missing iOS signing secrets (APPLE_CERTIFICATE_P12 or PROVISIONING_PROFILE)"
+            exit 1
+          fi
+
+          # Create temporary keychain
+          security create-keychain -p "$TEMP_KEYCHAIN_PASSWORD" "$TEMP_KEYCHAIN_NAME.keychain-db"
+          security set-keychain-settings -lut 21600 "$TEMP_KEYCHAIN_NAME.keychain-db"
+          security unlock-keychain -p "$TEMP_KEYCHAIN_PASSWORD" "$TEMP_KEYCHAIN_NAME.keychain-db"
+
+          # Add temp keychain to search list (keep login keychain too)
+          security list-keychains -d user -s "$TEMP_KEYCHAIN_NAME.keychain-db" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$TEMP_KEYCHAIN_NAME.keychain-db"
+
+          # Import certificate
+          CERT_PATH="${RUNNER_TEMP}/certificate.p12"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -k "$TEMP_KEYCHAIN_NAME.keychain-db" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          rm -f "$CERT_PATH"
+
+          # Allow codesign to access keychain without UI prompt
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$TEMP_KEYCHAIN_PASSWORD" "$TEMP_KEYCHAIN_NAME.keychain-db"
+
+          # Install provisioning profile
+          PROFILE_PATH="${RUNNER_TEMP}/profile.mobileprovision"
+          echo "$PROVISIONING_PROFILE" | base64 --decode > "$PROFILE_PATH"
+
+          # Extract UUID from profile and install
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin <<< $(security cms -D -i "$PROFILE_PATH"))
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision
+          rm -f "$PROFILE_PATH"
+
+          echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
+          echo "Installed provisioning profile: $PROFILE_UUID"
+
+          # Verify
+          echo "=== Signing identities ==="
+          security find-identity -v -p codesigning "$TEMP_KEYCHAIN_NAME.keychain-db"
+
+      - name: Prepare App Store Connect key
+        if: inputs.deploy_ios
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          if [ -z "$ASC_KEY_P8" ] || [ -z "$ASC_KEY_ID" ]; then
+            echo "::error::Missing ASC secrets (ASC_KEY_P8 or ASC_KEY_ID)"
+            exit 1
+          fi
+          KEY_PATH="${RUNNER_TEMP}/asc_key.p8"
+          printf '%s' "$ASC_KEY_P8" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "ASC_KEY_FILEPATH=$KEY_PATH" >> $GITHUB_ENV
+
+      # ========== ANDROID SIGNING SETUP ==========
+
+      - name: Setup Android signing
+        if: inputs.deploy_android
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_PROPERTIES: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::Missing ANDROID_KEYSTORE_BASE64 secret"
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/key.jks
+          echo "$ANDROID_KEY_PROPERTIES" > android/key.properties
+
+      - name: Prepare Google Play credentials
+        if: inputs.deploy_android
+        env:
+          GOOGLE_PLAY_JSON_KEY: ${{ secrets.GOOGLE_PLAY_JSON_KEY }}
+        run: |
+          if [ -z "$GOOGLE_PLAY_JSON_KEY" ]; then
+            echo "::error::Missing GOOGLE_PLAY_JSON_KEY secret"
+            exit 1
+          fi
+          KEY_PATH="${RUNNER_TEMP}/google_play_key.json"
+          printf '%s' "$GOOGLE_PLAY_JSON_KEY" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "SUPPLY_JSON_KEY=$KEY_PATH" >> $GITHUB_ENV
+
+      # ========== BUILD NUMBER ==========
+
+      - name: Get next build number
+        id: build_number
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          BUILD_NUMBER=${{ inputs.build_number_floor }}
+
+          # Try to get iOS build number
+          if [ "${{ inputs.deploy_ios }}" = "true" ]; then
+            cd ios
+            bundle config set --local path 'vendor/bundle'
+            bundle install --quiet 2>/dev/null || true
+            IOS_NUM=$(bundle exec fastlane next_build_number 2>&1 | grep -oE 'Next: [0-9]+' | grep -oE '[0-9]+' || echo "0")
+            cd ..
+            if [ "$IOS_NUM" -gt "$BUILD_NUMBER" ] 2>/dev/null; then
+              BUILD_NUMBER=$IOS_NUM
+            fi
+          fi
+
+          # Try to get Android build number
+          if [ "${{ inputs.deploy_android }}" = "true" ]; then
+            cd android
+            bundle config set --local path 'vendor/bundle'
+            bundle install --quiet 2>/dev/null || true
+            ANDROID_NUM=$(bundle exec fastlane next_build_number 2>&1 | grep -oE 'Next: [0-9]+' | grep -oE '[0-9]+' || echo "0")
+            cd ..
+            if [ "$ANDROID_NUM" -gt "$BUILD_NUMBER" ] 2>/dev/null; then
+              BUILD_NUMBER=$ANDROID_NUM
+            fi
+          fi
+
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "Using build number: $BUILD_NUMBER"
+
+      # ========== ENVIRONMENT ==========
+
+      - name: Create environment file
+        env:
+          FLUTTER_ENV: ${{ secrets.FLUTTER_ENV }}
+        run: |
+          if [ -n "$FLUTTER_ENV" ]; then
+            mkdir -p assets
+            printf '%s' "$FLUTTER_ENV" > assets/.env
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # ========== BUILD PHASE ==========
+
+      - name: Create ExportOptions.plist
+        if: inputs.deploy_ios
+        run: |
+          cat > "${RUNNER_TEMP}/ExportOptions.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>manageAppVersionAndBuildNumber</key>
+            <false/>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${IOS_BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+
+          # Get profile name from installed profile
+          PROFILE_FILE=~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /dev/stdin <<< $(security cms -D -i "$PROFILE_FILE"))
+
+          # Replace placeholders
+          sed -i '' "s|\${IOS_BUNDLE_ID}|${{ inputs.ios_bundle_id }}|g" "${RUNNER_TEMP}/ExportOptions.plist"
+          sed -i '' "s|\${PROFILE_NAME}|${PROFILE_NAME}|g" "${RUNNER_TEMP}/ExportOptions.plist"
+
+          echo "ExportOptions.plist:"
+          cat "${RUNNER_TEMP}/ExportOptions.plist"
+
+      - name: Build iOS IPA
+        if: inputs.deploy_ios
+        run: |
+          FLAVOR_ARGS=""
+          if [ -n "${{ inputs.flavor }}" ]; then
+            FLAVOR_ARGS="--flavor ${{ inputs.flavor }}"
+          fi
+          ENTRY_ARGS=""
+          if [ -n "${{ inputs.entry_point }}" ]; then
+            ENTRY_ARGS="-t ${{ inputs.entry_point }}"
+          fi
+          flutter build ipa $FLAVOR_ARGS $ENTRY_ARGS --release \
+            --build-name=${{ steps.version.outputs.VERSION }} \
+            --build-number=${{ steps.build_number.outputs.BUILD_NUMBER }} \
+            --export-options-plist="${RUNNER_TEMP}/ExportOptions.plist"
+
+      - name: Build Android AAB
+        if: inputs.deploy_android
+        run: |
+          FLAVOR_ARGS=""
+          if [ -n "${{ inputs.flavor }}" ]; then
+            FLAVOR_ARGS="--flavor ${{ inputs.flavor }}"
+          fi
+          ENTRY_ARGS=""
+          if [ -n "${{ inputs.entry_point }}" ]; then
+            ENTRY_ARGS="-t ${{ inputs.entry_point }}"
+          fi
+          flutter build appbundle $FLAVOR_ARGS $ENTRY_ARGS --release \
+            --build-name=${{ steps.version.outputs.VERSION }} \
+            --build-number=${{ steps.build_number.outputs.BUILD_NUMBER }}
+
+      # ========== DEPLOY PHASE ==========
+
+      - name: Upload to TestFlight
+        if: inputs.deploy_ios
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          cd ios
+          bundle config set --local path 'vendor/bundle'
+          bundle install --quiet
+          bundle exec fastlane run upload_to_testflight \
+            api_key_path:"${ASC_KEY_FILEPATH}" \
+            ipa:"../build/ios/ipa/*.ipa" \
+            skip_waiting_for_build_processing:true
+
+      - name: Upload to Google Play
+        if: inputs.deploy_android
+        run: |
+          cd android
+          bundle config set --local path 'vendor/bundle'
+          bundle install --quiet
+
+          # Find the AAB file
+          AAB_PATH=$(find ../build/app/outputs/bundle -name "*.aab" | head -1)
+          bundle exec fastlane run upload_to_play_store \
+            track:"${{ inputs.android_track }}" \
+            aab:"$AAB_PATH" \
+            skip_upload_metadata:true \
+            skip_upload_images:true \
+            skip_upload_screenshots:true
+
+      # ========== ARTIFACTS ==========
+
+      - name: Upload iOS artifact
+        if: inputs.deploy_ios
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Android artifact
+        if: inputs.deploy_android
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab
+          path: build/app/outputs/bundle/**/*.aab
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ========== CLEANUP ==========
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Delete temporary keychain
+          security delete-keychain "$TEMP_KEYCHAIN_NAME.keychain-db" 2>/dev/null || true
+          # Restore default keychain
+          security default-keychain -s ~/Library/Keychains/login.keychain-db 2>/dev/null || true
+          # Remove provisioning profile
+          rm -f ~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision 2>/dev/null || true
+          # Remove signing files
+          rm -f android/key.jks android/key.properties 2>/dev/null || true
+          rm -f assets/.env 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/asc_key.p8" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/google_play_key.json" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/ExportOptions.plist" 2>/dev/null || true
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "Deployment completed!"
+          echo "Version: ${{ steps.version.outputs.VERSION }}+${{ steps.build_number.outputs.BUILD_NUMBER }}"
+          echo "iOS: ${{ inputs.deploy_ios && '✅' || '⏭️ skipped' }}"
+          echo "Android: ${{ inputs.deploy_android && '✅' || '⏭️ skipped' }}"
+          echo "=========================================="
