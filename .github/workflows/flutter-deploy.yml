@@ -413,13 +413,17 @@ jobs:
           cd ios
           bundle config set --local path 'vendor/bundle'
           bundle install --quiet
-          IPA_PATH=$(find ../build/ios/ipa -name "*.ipa" | head -1)
+          echo "Looking for IPA files..."
+          find ../build/ios/ipa -type f -name "*.ipa" -ls 2>/dev/null
+          IPA_PATH=$(find ../build/ios/ipa -type f -name "*.ipa" | head -1)
           if [ -z "$IPA_PATH" ]; then
-            echo "::error::No IPA file found"
+            echo "::error::No IPA file found in ../build/ios/ipa"
+            ls -laR ../build/ios/ipa/ 2>/dev/null
             exit 1
           fi
+          echo "Uploading IPA: $IPA_PATH"
           bundle exec fastlane run upload_to_testflight \
-            api_key_path:"${ASC_KEY_FILEPATH}" \
+            api_key_path:"$ASC_KEY_FILEPATH" \
             ipa:"$IPA_PATH" \
             skip_waiting_for_build_processing:true
 
