@@ -414,17 +414,21 @@ jobs:
           bundle config set --local path 'vendor/bundle'
           bundle install --quiet
           echo "Looking for IPA files..."
-          find ../build/ios/ipa -type f -name "*.ipa" -ls 2>/dev/null
-          IPA_PATH=$(find ../build/ios/ipa -type f -name "*.ipa" | head -1)
-          if [ -z "$IPA_PATH" ]; then
+          ls -la ../build/ios/ipa/ 2>/dev/null
+
+          # Find IPA and rename to remove spaces (fastlane has issues with spaces)
+          IPA_ORIGINAL=$(find ../build/ios/ipa -type f -name "*.ipa" | head -1)
+          if [ -z "$IPA_ORIGINAL" ]; then
             echo "::error::No IPA file found in ../build/ios/ipa"
-            ls -laR ../build/ios/ipa/ 2>/dev/null
             exit 1
           fi
-          echo "Uploading IPA: $IPA_PATH"
+          IPA_SAFE="../build/ios/ipa/app.ipa"
+          mv "$IPA_ORIGINAL" "$IPA_SAFE"
+          echo "Uploading IPA: $IPA_SAFE ($(du -h "$IPA_SAFE" | cut -f1))"
+
           bundle exec fastlane run upload_to_testflight \
             api_key_path:"$ASC_KEY_FILEPATH" \
-            ipa:"$IPA_PATH" \
+            ipa:"$IPA_SAFE" \
             skip_waiting_for_build_processing:true
 
       - name: Upload to Google Play
