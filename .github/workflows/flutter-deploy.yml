@@ -224,9 +224,12 @@ jobs:
             exit 1
           fi
           echo "$ANDROID_KEY_PROPERTIES" > android/key.properties
-          # Extract keystore filename from key.properties (storeFile=xxx)
+          # Extract keystore path from key.properties and place it relative to android/
           STORE_FILE=$(grep 'storeFile' android/key.properties | cut -d'=' -f2 | tr -d '[:space:]')
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "android/${STORE_FILE:-key.jks}"
+          STORE_PATH="android/${STORE_FILE:-key.jks}"
+          mkdir -p "$(dirname "$STORE_PATH")"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$STORE_PATH"
+          echo "Keystore placed at: $STORE_PATH"
 
       - name: Prepare Google Play credentials
         if: inputs.deploy_android
