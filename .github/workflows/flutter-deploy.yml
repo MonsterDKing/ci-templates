@@ -302,7 +302,7 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>method</key>
-            <string>app-store-connect</string>
+            <string>app-store</string>
             <key>manageAppVersionAndBuildNumber</key>
             <false/>
             <key>signingStyle</key>
@@ -335,7 +335,10 @@ jobs:
           flutter build ipa $FLAVOR_ARGS $ENTRY_ARGS --release \
             --build-name=${{ steps.version.outputs.VERSION }} \
             --build-number=${{ steps.build_number.outputs.BUILD_NUMBER }} \
-            --export-options-plist="${RUNNER_TEMP}/ExportOptions.plist"
+            --export-options-plist="${RUNNER_TEMP}/ExportOptions.plist" \
+            -- -authenticationKeyPath "${ASC_KEY_FILEPATH}" \
+               -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+               -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
 
       - name: Build Android AAB
         if: inputs.deploy_android
