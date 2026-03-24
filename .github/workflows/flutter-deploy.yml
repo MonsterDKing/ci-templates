@@ -462,6 +462,8 @@ jobs:
           bundle exec fastlane run upload_to_play_store \
             track:"${{ inputs.android_track }}" \
             aab:"$AAB_PATH" \
+            json_key:"$SUPPLY_JSON_KEY" \
+            package_name:"${{ inputs.android_package_name }}" \
             skip_upload_metadata:true \
             skip_upload_images:true \
             skip_upload_screenshots:true
