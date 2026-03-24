@@ -427,8 +427,19 @@ jobs:
           fi
           echo "Uploading IPA: $(du -h "$IPA_SAFE" | cut -f1)"
 
+          # Create API key JSON that fastlane expects
+          API_KEY_JSON="${RUNNER_TEMP}/api_key.json"
+          cat > "$API_KEY_JSON" << APIJSON
+          {
+            "key_id": "${ASC_KEY_ID}",
+            "issuer_id": "${ASC_ISSUER_ID}",
+            "key_filepath": "${ASC_KEY_FILEPATH}",
+            "in_house": false
+          }
+          APIJSON
+
           bundle exec fastlane run upload_to_testflight \
-            api_key_path:"$ASC_KEY_FILEPATH" \
+            api_key_path:"$API_KEY_JSON" \
             ipa:"$IPA_SAFE" \
             skip_waiting_for_build_processing:true
 
