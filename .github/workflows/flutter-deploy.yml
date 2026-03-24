@@ -416,11 +416,25 @@ jobs:
           echo "Looking for IPA files..."
           ls -la ../build/ios/ipa/ 2>/dev/null
 
-          # Find IPA and rename to remove spaces
+          # Rename IPA to safe name (xcodebuild may create names with spaces/newlines)
           IPA_SAFE="../build/ios/ipa/app.ipa"
-          find ../build/ios/ipa -type f -name "*.ipa" -print0 | head -z -n1 | xargs -0 -I{} mv {} "$IPA_SAFE"
+          cd ../build/ios/ipa
+          for f in *.ipa *$'\n'*.ipa; do
+            if [ -f "$f" ]; then
+              mv "$f" app.ipa
+              break
+            fi
+          done
+          # If still no app.ipa, try finding any large file (the IPA)
+          if [ ! -f app.ipa ]; then
+            BIGGEST=$(ls -S | head -1)
+            if [ -n "$BIGGEST" ] && [ -f "$BIGGEST" ]; then
+              mv "$BIGGEST" app.ipa
+            fi
+          fi
+          cd "$GITHUB_WORKSPACE/ios"
           if [ ! -f "$IPA_SAFE" ]; then
-            echo "::error::No IPA file found in ../build/ios/ipa"
+            echo "::error::No IPA file found"
             ls -laR ../build/ios/ipa/ 2>/dev/null
             exit 1
           fi
