@@ -429,15 +429,16 @@ jobs:
 
           # Create API key JSON that fastlane expects
           API_KEY_JSON="${RUNNER_TEMP}/api_key.json"
-          KEY_CONTENT=$(cat "${ASC_KEY_FILEPATH}")
-          cat > "$API_KEY_JSON" <<APIJSON
-{
-  "key_id": "${ASC_KEY_ID}",
-  "issuer_id": "${ASC_ISSUER_ID}",
-  "key": $(python3 -c "import json; print(json.dumps(open('${ASC_KEY_FILEPATH}').read()))"),
-  "in_house": false
-}
-APIJSON
+          python3 -c "
+          import json
+          key_content = open('${ASC_KEY_FILEPATH}').read()
+          json.dump({
+            'key_id': '${ASC_KEY_ID}',
+            'issuer_id': '${ASC_ISSUER_ID}',
+            'key': key_content,
+            'in_house': False
+          }, open('${RUNNER_TEMP}/api_key.json', 'w'), indent=2)
+          "
 
           bundle exec fastlane run upload_to_testflight \
             api_key_path:"$API_KEY_JSON" \
