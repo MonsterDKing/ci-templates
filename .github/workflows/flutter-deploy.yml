@@ -370,11 +370,21 @@ jobs:
             -authenticationKeyPath "${ASC_KEY_FILEPATH}" \
             -authenticationKeyID "${ASC_KEY_ID}" \
             -authenticationKeyIssuerID "${ASC_ISSUER_ID}" \
-            -allowProvisioningUpdates \
-            | tail -5
+            -allowProvisioningUpdates 2>&1 | tail -5 || true
+
+          # Fallback: if xcodebuild export fails (e.g., macOS openrsync bug),
+          # create IPA manually from the signed archive
+          if ! ls build/ios/ipa/*.ipa 1>/dev/null 2>&1; then
+            echo "⚠️ xcodebuild export failed, creating IPA manually from archive..."
+            mkdir -p "${RUNNER_TEMP}/ipa_payload/Payload"
+            cp -R "${RUNNER_TEMP}/app.xcarchive/Products/Applications/"*.app "${RUNNER_TEMP}/ipa_payload/Payload/"
+            APP_NAME=$(ls "${RUNNER_TEMP}/ipa_payload/Payload/" | head -1 | sed 's/.app$//')
+            (cd "${RUNNER_TEMP}/ipa_payload" && zip -r -q "${GITHUB_WORKSPACE}/build/ios/ipa/${APP_NAME}.ipa" Payload)
+            rm -rf "${RUNNER_TEMP}/ipa_payload"
+          fi
 
           echo "IPA files:"
-          ls -la build/ios/ipa/*.ipa 2>/dev/null || echo "No IPA found!"
+          ls -la build/ios/ipa/*.ipa 2>/dev/null || echo "::error::No IPA file generated!"
 
       - name: Build Android AAB
         if: inputs.deploy_android
