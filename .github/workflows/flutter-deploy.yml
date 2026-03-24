@@ -361,7 +361,8 @@ jobs:
             -allowProvisioningUpdates \
             | tail -5
 
-          # Export IPA
+          # Export IPA (ensure system rsync is used — homebrew rsync conflicts with openrsync)
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
           mkdir -p build/ios/ipa
           xcodebuild -exportArchive \
             -archivePath "${RUNNER_TEMP}/app.xcarchive" \
