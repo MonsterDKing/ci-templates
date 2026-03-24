@@ -223,8 +223,10 @@ jobs:
             echo "::error::Missing ANDROID_KEYSTORE_BASE64 secret"
             exit 1
           fi
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/key.jks
           echo "$ANDROID_KEY_PROPERTIES" > android/key.properties
+          # Extract keystore filename from key.properties (storeFile=xxx)
+          STORE_FILE=$(grep 'storeFile' android/key.properties | cut -d'=' -f2 | tr -d '[:space:]')
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "android/${STORE_FILE:-key.jks}"
 
       - name: Prepare Google Play credentials
         if: inputs.deploy_android
@@ -495,7 +497,7 @@ jobs:
           # Remove provisioning profile
           rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision" 2>/dev/null || true
           # Remove signing files
-          rm -f android/key.jks android/key.properties 2>/dev/null || true
+          rm -f android/*.jks android/key.properties 2>/dev/null || true
           rm -f assets/.env 2>/dev/null || true
           rm -f "${RUNNER_TEMP}/asc_key.p8" 2>/dev/null || true
           rm -f "${RUNNER_TEMP}/google_play_key.json" 2>/dev/null || true
