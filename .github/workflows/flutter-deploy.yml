@@ -416,15 +416,15 @@ jobs:
           echo "Looking for IPA files..."
           ls -la ../build/ios/ipa/ 2>/dev/null
 
-          # Find IPA and rename to remove spaces (fastlane has issues with spaces)
-          IPA_ORIGINAL=$(find ../build/ios/ipa -type f -name "*.ipa" | head -1)
-          if [ -z "$IPA_ORIGINAL" ]; then
+          # Find IPA and rename to remove spaces
+          IPA_SAFE="../build/ios/ipa/app.ipa"
+          find ../build/ios/ipa -type f -name "*.ipa" -print0 | head -z -n1 | xargs -0 -I{} mv {} "$IPA_SAFE"
+          if [ ! -f "$IPA_SAFE" ]; then
             echo "::error::No IPA file found in ../build/ios/ipa"
+            ls -laR ../build/ios/ipa/ 2>/dev/null
             exit 1
           fi
-          IPA_SAFE="../build/ios/ipa/app.ipa"
-          mv "$IPA_ORIGINAL" "$IPA_SAFE"
-          echo "Uploading IPA: $IPA_SAFE ($(du -h "$IPA_SAFE" | cut -f1))"
+          echo "Uploading IPA: $(du -h "$IPA_SAFE" | cut -f1)"
 
           bundle exec fastlane run upload_to_testflight \
             api_key_path:"$ASC_KEY_FILEPATH" \
