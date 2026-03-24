@@ -321,7 +321,7 @@ jobs:
           echo "ExportOptions.plist:"
           cat "${RUNNER_TEMP}/ExportOptions.plist"
 
-      - name: Build iOS IPA
+      - name: Build iOS
         if: inputs.deploy_ios
         run: |
           FLAVOR_ARGS=""
@@ -332,13 +332,49 @@ jobs:
           if [ -n "${{ inputs.entry_point }}" ]; then
             ENTRY_ARGS="-t ${{ inputs.entry_point }}"
           fi
-          flutter build ipa $FLAVOR_ARGS $ENTRY_ARGS --release \
+          flutter build ios $FLAVOR_ARGS $ENTRY_ARGS --release --no-codesign \
             --build-name=${{ steps.version.outputs.VERSION }} \
-            --build-number=${{ steps.build_number.outputs.BUILD_NUMBER }} \
-            --export-options-plist="${RUNNER_TEMP}/ExportOptions.plist" \
-            -- -authenticationKeyPath "${ASC_KEY_FILEPATH}" \
-               -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
-               -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+            --build-number=${{ steps.build_number.outputs.BUILD_NUMBER }}
+
+      - name: Archive and export iOS IPA
+        if: inputs.deploy_ios
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          SCHEME="${{ inputs.flavor }}"
+          if [ -z "$SCHEME" ]; then
+            SCHEME="Runner"
+          fi
+
+          # Archive
+          xcodebuild -workspace ios/Runner.xcworkspace \
+            -scheme "$SCHEME" \
+            -configuration "Release${SCHEME:+-$(echo $SCHEME | sed 's/.*/\u&/')}" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "${RUNNER_TEMP}/app.xcarchive" \
+            archive \
+            -authenticationKeyPath "${ASC_KEY_FILEPATH}" \
+            -authenticationKeyID "${ASC_KEY_ID}" \
+            -authenticationKeyIssuerID "${ASC_ISSUER_ID}" \
+            -allowProvisioningUpdates \
+            | tail -5
+
+          # Export IPA
+          mkdir -p build/ios/ipa
+          xcodebuild -exportArchive \
+            -archivePath "${RUNNER_TEMP}/app.xcarchive" \
+            -exportOptionsPlist "${RUNNER_TEMP}/ExportOptions.plist" \
+            -exportPath build/ios/ipa \
+            -authenticationKeyPath "${ASC_KEY_FILEPATH}" \
+            -authenticationKeyID "${ASC_KEY_ID}" \
+            -authenticationKeyIssuerID "${ASC_ISSUER_ID}" \
+            -allowProvisioningUpdates \
+            | tail -5
+
+          echo "IPA files:"
+          ls -la build/ios/ipa/*.ipa 2>/dev/null || echo "No IPA found!"
 
       - name: Build Android AAB
         if: inputs.deploy_android
@@ -366,9 +402,14 @@ jobs:
           cd ios
           bundle config set --local path 'vendor/bundle'
           bundle install --quiet
+          IPA_PATH=$(find ../build/ios/ipa -name "*.ipa" | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "::error::No IPA file found"
+            exit 1
+          fi
           bundle exec fastlane run upload_to_testflight \
             api_key_path:"${ASC_KEY_FILEPATH}" \
-            ipa:"../build/ios/ipa/*.ipa" \
+            ipa:"$IPA_PATH" \
             skip_waiting_for_build_processing:true
 
       - name: Upload to Google Play
