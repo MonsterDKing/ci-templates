@@ -180,14 +180,17 @@ jobs:
           PROFILE_PATH="${RUNNER_TEMP}/profile.mobileprovision"
           echo "$PROVISIONING_PROFILE" | base64 --decode > "$PROFILE_PATH"
 
-          # Extract UUID from profile and install
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin <<< $(security cms -D -i "$PROFILE_PATH"))
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision
+          # Extract UUID and Name from profile
+          PROFILE_PLIST=$(security cms -D -i "$PROFILE_PATH")
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin <<< "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /dev/stdin <<< "$PROFILE_PLIST")
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
           rm -f "$PROFILE_PATH"
 
           echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
-          echo "Installed provisioning profile: $PROFILE_UUID"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> $GITHUB_ENV
+          echo "Installed provisioning profile: $PROFILE_NAME ($PROFILE_UUID)"
 
           # Verify
           echo "=== Signing identities ==="
@@ -293,7 +296,7 @@ jobs:
       - name: Create ExportOptions.plist
         if: inputs.deploy_ios
         run: |
-          cat > "${RUNNER_TEMP}/ExportOptions.plist" << 'PLIST'
+          cat > "${RUNNER_TEMP}/ExportOptions.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -308,20 +311,12 @@ jobs:
             <true/>
             <key>provisioningProfiles</key>
             <dict>
-              <key>${IOS_BUNDLE_ID}</key>
+              <key>${{ inputs.ios_bundle_id }}</key>
               <string>${PROFILE_NAME}</string>
             </dict>
           </dict>
           </plist>
-          PLIST
-
-          # Get profile name from installed profile
-          PROFILE_FILE=~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /dev/stdin <<< $(security cms -D -i "$PROFILE_FILE"))
-
-          # Replace placeholders
-          sed -i '' "s|\${IOS_BUNDLE_ID}|${{ inputs.ios_bundle_id }}|g" "${RUNNER_TEMP}/ExportOptions.plist"
-          sed -i '' "s|\${PROFILE_NAME}|${PROFILE_NAME}|g" "${RUNNER_TEMP}/ExportOptions.plist"
+          EOF
 
           echo "ExportOptions.plist:"
           cat "${RUNNER_TEMP}/ExportOptions.plist"
@@ -421,7 +416,7 @@ jobs:
           # Restore default keychain
           security default-keychain -s ~/Library/Keychains/login.keychain-db 2>/dev/null || true
           # Remove provisioning profile
-          rm -f ~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision 2>/dev/null || true
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision" 2>/dev/null || true
           # Remove signing files
           rm -f android/key.jks android/key.properties 2>/dev/null || true
           rm -f assets/.env 2>/dev/null || true
