@@ -296,6 +296,15 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Generate code (build_runner)
+        run: |
+          if grep -q 'build_runner' pubspec.yaml pubspec.lock 2>/dev/null; then
+            echo "build_runner detected, generating code..."
+            dart run build_runner build --delete-conflicting-outputs
+          else
+            echo "No build_runner dependency found, skipping"
+          fi
+
       # ========== BUILD PHASE ==========
 
       - name: Create ExportOptions.plist
